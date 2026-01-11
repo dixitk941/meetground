@@ -695,6 +695,40 @@ export const MeetingProvider = ({ children }) => {
     }
   };
 
+  // Set individual participant permissions (admin only)
+  const setParticipantPermissions = async (participantId, permissions) => {
+    if (meetingId && isAdmin) {
+      const updates = {};
+      if (permissions.micAllowed !== undefined) {
+        updates.micAllowed = permissions.micAllowed;
+        if (!permissions.micAllowed) {
+          updates.isMicOn = false;
+        }
+      }
+      if (permissions.videoAllowed !== undefined) {
+        updates.videoAllowed = permissions.videoAllowed;
+        if (!permissions.videoAllowed) {
+          updates.isCameraOn = false;
+        }
+      }
+      if (permissions.screenShareAllowed !== undefined) {
+        updates.screenShareAllowed = permissions.screenShareAllowed;
+      }
+      await updateDoc(doc(db, 'meetings', meetingId, 'participants', participantId), updates);
+    }
+  };
+
+  // Remove a participant from the meeting (admin only)
+  const removeParticipant = async (participantId) => {
+    if (meetingId && isAdmin && participantId !== currentUserId) {
+      // Mark participant as removed
+      await updateDoc(doc(db, 'meetings', meetingId, 'participants', participantId), {
+        removed: true,
+        removedAt: serverTimestamp(),
+      });
+    }
+  };
+
   // Update whiteboard data
   const updateWhiteboard = async (data) => {
     if (meetingId) {
@@ -862,6 +896,8 @@ export const MeetingProvider = ({ children }) => {
     initializeMedia,
     updateMeetingSettings,
     muteParticipant,
+    setParticipantPermissions,
+    removeParticipant,
     updateWhiteboard,
     updateCode,
     updateActiveView,

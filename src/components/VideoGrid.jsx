@@ -1,5 +1,17 @@
-import { useRef, useEffect, useState } from 'react';
-import { Mic, MicOff, Pin, PinOff, ChevronLeft, ChevronRight, Maximize2, Minimize2 } from 'lucide-react';
+import { useRef, useEffect, useState, useCallback } from 'react';
+import { 
+  Mic, 
+  MicOff, 
+  Pin, 
+  PinOff, 
+  ChevronLeft, 
+  ChevronRight, 
+  Maximize2, 
+  Minimize2,
+  MoreVertical,
+  Volume2,
+  Hand
+} from 'lucide-react';
 import { useMeeting } from '../context/MeetingContext';
 
 // Separate audio player component to handle remote audio
@@ -11,13 +23,6 @@ const AudioPlayer = ({ stream }) => {
       audioRef.current.srcObject = stream;
       audioRef.current.play().catch(e => {
         console.log('Audio autoplay prevented:', e);
-      });
-      
-      const audioTracks = stream.getAudioTracks();
-      console.log('AudioPlayer: Playing audio from stream', {
-        streamId: stream.id,
-        audioTracks: audioTracks.length,
-        trackStates: audioTracks.map(t => ({ id: t.id, enabled: t.enabled, readyState: t.readyState })),
       });
     }
   }, [stream]);
@@ -32,10 +37,57 @@ const AudioPlayer = ({ stream }) => {
   );
 };
 
+// Audio level indicator hook
+const useAudioLevel = (stream, isLocal) => {
+  const [audioLevel, setAudioLevel] = useState(0);
+  const analyserRef = useRef(null);
+  const animationRef = useRef(null);
+
+  useEffect(() => {
+    if (!stream) return;
+
+    const audioTrack = stream.getAudioTracks()[0];
+    if (!audioTrack || !audioTrack.enabled) {
+      setAudioLevel(0);
+      return;
+    }
+
+    try {
+      const audioContext = new AudioContext();
+      const analyser = audioContext.createAnalyser();
+      const source = audioContext.createMediaStreamSource(stream);
+      source.connect(analyser);
+      analyser.fftSize = 256;
+      analyserRef.current = analyser;
+
+      const dataArray = new Uint8Array(analyser.frequencyBinCount);
+
+      const checkAudioLevel = () => {
+        analyser.getByteFrequencyData(dataArray);
+        const average = dataArray.reduce((a, b) => a + b) / dataArray.length;
+        setAudioLevel(average / 255);
+        animationRef.current = requestAnimationFrame(checkAudioLevel);
+      };
+
+      checkAudioLevel();
+
+      return () => {
+        cancelAnimationFrame(animationRef.current);
+        audioContext.close();
+      };
+    } catch (e) {
+      console.log('Audio level detection not available:', e);
+    }
+  }, [stream]);
+
+  return audioLevel;
+};
+
 const VideoGrid = ({ participants, localStream }) => {
   const { remoteStreams, pinnedParticipant, pinParticipant, currentUserId } = useMeeting();
   const [currentPage, setCurrentPage] = useState(0);
   const [focusMode, setFocusMode] = useState(false);
+  const [activeSpeaker, setActiveSpeaker] = useState(null);
   
   // Separate local user and remote participants
   const localParticipant = participants.find(p => p.id === currentUserId);
@@ -46,20 +98,19 @@ const VideoGrid = ({ participants, localStream }) => {
     ? participants.find(p => p.id === pinnedParticipant)
     : null;
 
-  // If more than 6 participants, show focus mode with pagination
+  // Calculate grid layout based on participant count
   const totalCount = participants.length;
-  const maxVisibleInGrid = 6;
-  const shouldUseFocusMode = totalCount > maxVisibleInGrid || focusMode || pinnedParticipant;
+  const shouldUseFocusMode = totalCount > 6 || focusMode || pinnedParticipant;
   
-  // In focus mode: 1 main + 4 small tiles per page
   const tilesPerPage = 4;
   
-  // Get participants for current page (excluding the focused one)
   const getFocusedParticipant = () => {
     if (pinnedParticipant) {
       return pinnedParticipantData;
     }
-    // Default to admin or first participant
+    if (activeSpeaker) {
+      return participants.find(p => p.id === activeSpeaker);
+    }
     const admin = participants.find(p => p.isAdmin);
     return admin || participants[0];
   };
@@ -77,44 +128,47 @@ const VideoGrid = ({ participants, localStream }) => {
     (currentPage + 1) * tilesPerPage
   );
 
-  // Simple grid mode (6 or fewer participants)
-  if (!shouldUseFocusMode && totalCount <= maxVisibleInGrid) {
-    const gridClass = getGridClass(totalCount);
-    
+  // Grid layout for simple mode
+  if (!shouldUseFocusMode && totalCount <= 6) {
     return (
-      <div className={`video-grid-container ${gridClass}`}>
-        {/* Local video tile */}
-        {localParticipant && (
-          <VideoTile
-            key="local"
-            stream={localStream}
-            participant={localParticipant}
-            isLocal={true}
-            onPin={() => pinParticipant(currentUserId)}
-            isPinned={pinnedParticipant === currentUserId}
-          />
-        )}
-        
-        {/* Remote participant tiles */}
-        {remoteParticipants.map((participant) => (
-          <VideoTile
-            key={participant.id}
-            stream={remoteStreams[participant.id]}
-            participant={participant}
-            isLocal={false}
-            onPin={() => pinParticipant(participant.id)}
-            isPinned={pinnedParticipant === participant.id}
-          />
-        ))}
+      <div className="h-full w-full p-3 md:p-4">
+        <div className={`h-full grid gap-2 md:gap-3 ${getGridClasses(totalCount)}`}>
+          {/* Local video tile */}
+          {localParticipant && (
+            <VideoTile
+              key="local"
+              stream={localStream}
+              participant={localParticipant}
+              isLocal={true}
+              onPin={() => pinParticipant(currentUserId)}
+              isPinned={pinnedParticipant === currentUserId}
+              isActiveSpeaker={activeSpeaker === currentUserId}
+            />
+          )}
+          
+          {/* Remote participant tiles */}
+          {remoteParticipants.map((participant) => (
+            <VideoTile
+              key={participant.id}
+              stream={remoteStreams[participant.id]}
+              participant={participant}
+              isLocal={false}
+              onPin={() => pinParticipant(participant.id)}
+              isPinned={pinnedParticipant === participant.id}
+              isActiveSpeaker={activeSpeaker === participant.id}
+              onSpeaking={(speaking) => speaking && setActiveSpeaker(participant.id)}
+            />
+          ))}
+        </div>
       </div>
     );
   }
 
   // Focus mode with main speaker and side tiles
   return (
-    <div className="h-full w-full flex flex-col lg:flex-row gap-3 p-4">
+    <div className="h-full w-full flex flex-col lg:flex-row gap-2 md:gap-3 p-3 md:p-4">
       {/* Main focused video */}
-      <div className="flex-1 relative min-h-0">
+      <div className="flex-1 relative min-h-0 h-[60%] lg:h-full">
         {focusedParticipant && (
           <VideoTile
             key={focusedParticipant.id}
@@ -124,29 +178,30 @@ const VideoGrid = ({ participants, localStream }) => {
             isFocused={true}
             onPin={() => pinParticipant(focusedParticipant.id)}
             isPinned={pinnedParticipant === focusedParticipant.id}
+            isActiveSpeaker={activeSpeaker === focusedParticipant.id}
           />
         )}
         
         {/* Toggle focus mode button */}
         <button
           onClick={() => setFocusMode(!focusMode)}
-          className="absolute top-4 right-4 p-2 bg-black/70 hover:bg-black/90 rounded-lg transition-colors z-10"
+          className="absolute top-3 right-3 md:top-4 md:right-4 p-2 bg-black/70 hover:bg-black/90 rounded-xl transition-all z-10 backdrop-blur-sm"
           title={focusMode ? 'Exit focus mode' : 'Enter focus mode'}
         >
           {focusMode ? (
-            <Minimize2 className="w-5 h-5 text-white" />
+            <Minimize2 className="w-4 h-4 md:w-5 md:h-5 text-white" />
           ) : (
-            <Maximize2 className="w-5 h-5 text-white" />
+            <Maximize2 className="w-4 h-4 md:w-5 md:h-5 text-white" />
           )}
         </button>
       </div>
 
       {/* Side tiles with pagination */}
       {otherParticipants.length > 0 && (
-        <div className="lg:w-72 flex flex-col gap-3">
+        <div className="lg:w-64 xl:w-72 flex flex-col gap-2 h-[35%] lg:h-full">
           {/* Pagination header */}
           {totalPages > 1 && (
-            <div className="flex items-center justify-between px-2">
+            <div className="flex items-center justify-between px-2 shrink-0">
               <button
                 onClick={() => setCurrentPage(p => Math.max(0, p - 1))}
                 disabled={currentPage === 0}
@@ -168,7 +223,7 @@ const VideoGrid = ({ participants, localStream }) => {
           )}
 
           {/* Side video tiles */}
-          <div className="flex-1 flex flex-row lg:flex-col gap-2 overflow-hidden">
+          <div className="flex-1 flex flex-row lg:flex-col gap-2 overflow-hidden min-h-0">
             {visibleParticipants.map((participant) => (
               <VideoTile
                 key={participant.id}
@@ -178,12 +233,14 @@ const VideoGrid = ({ participants, localStream }) => {
                 isSmall={true}
                 onPin={() => pinParticipant(participant.id)}
                 isPinned={pinnedParticipant === participant.id}
+                isActiveSpeaker={activeSpeaker === participant.id}
+                onSpeaking={(speaking) => speaking && setActiveSpeaker(participant.id)}
               />
             ))}
           </div>
 
           {/* Participant count indicator */}
-          <div className="text-center text-gray-500 text-xs">
+          <div className="text-center text-gray-500 text-xs shrink-0">
             {otherParticipants.length + 1} participants
           </div>
         </div>
@@ -192,12 +249,12 @@ const VideoGrid = ({ participants, localStream }) => {
   );
 };
 
-// Helper function to get grid class based on participant count
-const getGridClass = (count) => {
-  if (count === 1) return 'grid-1';
-  if (count === 2) return 'grid-2';
-  if (count <= 4) return 'grid-4';
-  return 'grid-6';
+// Helper function to get responsive grid classes
+const getGridClasses = (count) => {
+  if (count === 1) return 'grid-cols-1';
+  if (count === 2) return 'grid-cols-1 md:grid-cols-2';
+  if (count <= 4) return 'grid-cols-2';
+  return 'grid-cols-2 md:grid-cols-3';
 };
 
 const VideoTile = ({ 
@@ -208,46 +265,50 @@ const VideoTile = ({
   isSmall = false,
   onPin,
   isPinned = false,
+  isActiveSpeaker = false,
+  onSpeaking,
 }) => {
   const videoRef = useRef(null);
   const name = participant?.displayName || 'Guest';
   const isMicOn = participant?.isMicOn ?? false;
   const isCameraOn = participant?.isCameraOn ?? false;
   const isAdmin = participant?.isAdmin ?? false;
+  const audioLevel = useAudioLevel(stream, isLocal);
+  const [showMenu, setShowMenu] = useState(false);
+
+  // Detect speaking
+  useEffect(() => {
+    if (audioLevel > 0.1 && isMicOn) {
+      onSpeaking?.(true);
+    }
+  }, [audioLevel, isMicOn, onSpeaking]);
 
   useEffect(() => {
     if (videoRef.current && stream) {
       videoRef.current.srcObject = stream;
-      // Ensure video plays
       videoRef.current.play().catch(e => {
         console.log('Video autoplay prevented:', e);
       });
-      
-      console.log(`Stream for ${name}:`, {
-        id: stream.id,
-        active: stream.active,
-        audioTracks: stream.getAudioTracks().length,
-        videoTracks: stream.getVideoTracks().length,
-      });
     }
-  }, [stream, name]);
+  }, [stream]);
 
-  const tileClasses = isFocused
-    ? 'video-tile-focused'
-    : isSmall
-    ? 'video-tile-small'
-    : 'video-tile';
-
-  // Check if stream has video tracks
   const hasVideoTracks = stream && stream.getVideoTracks().length > 0;
-  
-  // Show video element if we have a stream (will show black if camera is off, video if on)
   const shouldShowVideo = stream && hasVideoTracks;
   const hasAudioTracks = stream && stream.getAudioTracks().length > 0;
+  const isSpeaking = audioLevel > 0.1 && isMicOn;
+
+  // Dynamic border based on speaking
+  const borderClass = isSpeaking || isActiveSpeaker
+    ? 'ring-2 ring-green-500 ring-opacity-75'
+    : isPinned
+    ? 'ring-2 ring-white ring-opacity-50'
+    : '';
 
   return (
-    <div className={`${tileClasses} group`}>
-      {/* Always render AudioPlayer for remote participants with audio (even if no video) */}
+    <div className={`relative rounded-xl md:rounded-2xl overflow-hidden bg-[#111111] transition-all duration-300 ${borderClass} ${
+      isFocused ? 'h-full' : isSmall ? 'flex-1 min-h-[80px] lg:h-auto lg:flex-none' : 'aspect-video'
+    } group`}>
+      {/* Audio player for remote participants */}
       {!isLocal && hasAudioTracks && (
         <AudioPlayer stream={stream} />
       )}
@@ -260,60 +321,99 @@ const VideoTile = ({
           muted={isLocal}
           className={`absolute inset-0 w-full h-full object-cover ${isLocal ? 'scale-x-[-1]' : ''}`}
         />
-      ) : (
-        <div className="absolute inset-0 flex items-center justify-center bg-[#0a0a0a]">
-          <div className={`${isFocused ? 'w-28 h-28' : isSmall ? 'w-12 h-12' : 'w-20 h-20'} rounded-xl bg-[#1a1a1a] border border-[#333333] flex items-center justify-center`}>
-            <span className={`${isFocused ? 'text-5xl' : isSmall ? 'text-lg' : 'text-3xl'} font-semibold text-white`}>
-              {(name || 'U')[0].toUpperCase()}
-            </span>
-          </div>
-        </div>
-      )}
+      ) : null}
       
-      {/* Show avatar overlay when video element exists but camera is off */}
-      {shouldShowVideo && !isCameraOn && (
-        <div className="absolute inset-0 flex items-center justify-center bg-[#0a0a0a]">
-          <div className={`${isFocused ? 'w-28 h-28' : isSmall ? 'w-12 h-12' : 'w-20 h-20'} rounded-xl bg-[#1a1a1a] border border-[#333333] flex items-center justify-center`}>
-            <span className={`${isFocused ? 'text-5xl' : isSmall ? 'text-lg' : 'text-3xl'} font-semibold text-white`}>
+      {/* Avatar when no video or camera off */}
+      {(!shouldShowVideo || !isCameraOn) && (
+        <div className="absolute inset-0 flex items-center justify-center bg-gradient-to-br from-[#111111] to-[#0a0a0a]">
+          <div className={`${
+            isFocused ? 'w-24 h-24 md:w-32 md:h-32' : isSmall ? 'w-10 h-10 md:w-12 md:h-12' : 'w-16 h-16 md:w-20 md:h-20'
+          } rounded-2xl bg-gradient-to-br from-[#222222] to-[#1a1a1a] border border-[#333333] flex items-center justify-center transition-transform ${
+            isSpeaking ? 'scale-110' : ''
+          }`}>
+            <span className={`${
+              isFocused ? 'text-4xl md:text-5xl' : isSmall ? 'text-base md:text-lg' : 'text-2xl md:text-3xl'
+            } font-semibold text-white`}>
               {(name || 'U')[0].toUpperCase()}
             </span>
           </div>
+          
+          {/* Audio visualizer when speaking */}
+          {isSpeaking && (
+            <div className="absolute bottom-1/3 flex gap-1 items-end">
+              {[...Array(5)].map((_, i) => (
+                <div
+                  key={i}
+                  className="w-1 bg-green-500 rounded-full animate-pulse"
+                  style={{
+                    height: `${Math.random() * 20 + 10}px`,
+                    animationDelay: `${i * 0.1}s`,
+                  }}
+                />
+              ))}
+            </div>
+          )}
         </div>
       )}
 
+      {/* Gradient overlay */}
+      <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-transparent to-transparent pointer-events-none" />
+
       {/* Name badge */}
-      <div className={`absolute ${isSmall ? 'bottom-2 left-2' : 'bottom-3 left-3'} flex items-center`}>
-        <div className={`flex items-center gap-2 ${isSmall ? 'px-2 py-1' : 'px-3 py-1.5'} bg-black/80 backdrop-blur-sm rounded-lg`}>
-          {!isMicOn ? (
-            <MicOff className={`${isSmall ? 'w-3 h-3' : 'w-3.5 h-3.5'} text-red-500`} />
-          ) : (
-            <Mic className={`${isSmall ? 'w-3 h-3' : 'w-3.5 h-3.5'} text-green-500`} />
-          )}
-          <span className={`text-white ${isSmall ? 'text-xs' : 'text-sm'} font-medium truncate max-w-[120px]`}>
+      <div className={`absolute ${isSmall ? 'bottom-1.5 left-1.5' : 'bottom-2 left-2 md:bottom-3 md:left-3'} flex items-center`}>
+        <div className={`flex items-center gap-1.5 md:gap-2 ${isSmall ? 'px-2 py-1' : 'px-2.5 py-1.5 md:px-3 md:py-2'} bg-black/60 backdrop-blur-sm rounded-lg md:rounded-xl`}>
+          {/* Mic indicator */}
+          <div className={`${isMicOn ? 'text-green-500' : 'text-red-500'}`}>
+            {isMicOn ? (
+              <div className="relative">
+                <Mic className={`${isSmall ? 'w-3 h-3' : 'w-3.5 h-3.5 md:w-4 md:h-4'}`} />
+                {isSpeaking && (
+                  <div className="absolute -top-0.5 -right-0.5 w-2 h-2 bg-green-500 rounded-full animate-ping" />
+                )}
+              </div>
+            ) : (
+              <MicOff className={`${isSmall ? 'w-3 h-3' : 'w-3.5 h-3.5 md:w-4 md:h-4'}`} />
+            )}
+          </div>
+          
+          {/* Name */}
+          <span className={`text-white ${isSmall ? 'text-xs' : 'text-xs md:text-sm'} font-medium truncate ${isSmall ? 'max-w-[60px]' : 'max-w-[100px] md:max-w-[120px]'}`}>
             {name}
-            {isAdmin && <span className="text-yellow-500 ml-1">★</span>}
           </span>
+          
+          {/* Admin badge */}
+          {isAdmin && (
+            <span className="text-yellow-500 text-xs">★</span>
+          )}
         </div>
       </div>
 
       {/* Pin button */}
       <button 
         onClick={onPin}
-        className={`absolute ${isSmall ? 'top-2 right-2' : 'top-3 right-3'} p-2 bg-black/80 backdrop-blur-sm rounded-lg opacity-0 group-hover:opacity-100 transition-opacity ${isPinned ? '!opacity-100 bg-white' : ''}`}
+        className={`absolute ${isSmall ? 'top-1.5 right-1.5' : 'top-2 right-2 md:top-3 md:right-3'} p-1.5 md:p-2 bg-black/60 backdrop-blur-sm rounded-lg md:rounded-xl opacity-0 group-hover:opacity-100 transition-all ${isPinned ? '!opacity-100 bg-white' : ''}`}
         title={isPinned ? 'Unpin' : 'Pin'}
       >
         {isPinned ? (
-          <PinOff className={`${isSmall ? 'w-3 h-3' : 'w-4 h-4'} text-black`} />
+          <PinOff className={`${isSmall ? 'w-3 h-3' : 'w-3.5 h-3.5 md:w-4 md:h-4'} text-black`} />
         ) : (
-          <Pin className={`${isSmall ? 'w-3 h-3' : 'w-4 h-4'} text-white`} />
+          <Pin className={`${isSmall ? 'w-3 h-3' : 'w-3.5 h-3.5 md:w-4 md:h-4'} text-white`} />
         )}
       </button>
 
       {/* Local indicator */}
       {isLocal && (
-        <div className={`absolute ${isSmall ? 'top-2 left-2' : 'top-3 left-3'} flex items-center gap-1.5 px-2 py-1 bg-black/80 backdrop-blur-sm rounded-lg`}>
-          <div className="w-2 h-2 bg-green-500 rounded-full animate-pulse"></div>
+        <div className={`absolute ${isSmall ? 'top-1.5 left-1.5' : 'top-2 left-2 md:top-3 md:left-3'} flex items-center gap-1.5 px-2 py-1 bg-black/60 backdrop-blur-sm rounded-lg md:rounded-xl`}>
+          <div className="w-1.5 h-1.5 md:w-2 md:h-2 bg-green-500 rounded-full animate-pulse"></div>
           <span className="text-xs text-white font-medium">YOU</span>
+        </div>
+      )}
+
+      {/* Speaking indicator for focused view */}
+      {isFocused && isSpeaking && (
+        <div className="absolute top-3 left-1/2 -translate-x-1/2 flex items-center gap-2 px-3 py-1.5 bg-green-500/20 backdrop-blur-sm rounded-full border border-green-500/30">
+          <Volume2 className="w-4 h-4 text-green-500" />
+          <span className="text-green-500 text-sm font-medium">Speaking</span>
         </div>
       )}
     </div>
